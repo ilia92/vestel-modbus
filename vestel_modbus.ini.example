@@ -1,0 +1,6 @@
+[vestel]
+ip = 192.168.1.100
+port = 502
+unit = 1
+base = 0
+timeout = 2.0
