@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Vestel EV – API Frontend (Phase Fill)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+  :root{ --thumb:36px; }
+  #api-base-label { display: none !important; }
+
+  body{ background:#f8f9fa; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .container{ max-width: 880px; margin-top: 10px; margin-bottom: 10px; }
+  .card{ border-radius: 14px; box-shadow: 0 4px 10px rgba(0,0,0,.06); }
+  .card-header{ background:rgba(13,110,253,.08); font-weight:600; }
+
+  /* Slider */
+  .slider{ -webkit-appearance:none; width:100%; height:10px; background:#e9ecef; border-radius:5px; outline:none; }
+  .slider::-webkit-slider-thumb{ appearance:none; width:var(--thumb); height:var(--thumb); border-radius:50%; background:#0d6efd; cursor:pointer; }
+  .slider::-moz-range-thumb{ width:var(--thumb); height:var(--thumb); border-radius:50%; background:#0d6efd; cursor:pointer; }
+
+  /* Hide ONLY the thumb when not connected */
+  .no-conn .slider::-webkit-slider-thumb{ width:0;height:0;border:0; }
+  .no-conn .slider::-moz-range-thumb{ width:0;height:0;border:0; }
+
+  .ticks-container{ position:relative; height:30px; margin:0 0 12px 0; padding:0 calc(var(--thumb)/2); box-sizing:border-box; }
+  .tick-mark{ position:absolute; width:2px; height:10px; background:#adb5bd; transform:translateX(-50%); z-index:1; }
+  .tick-mark.major{ height:15px; background:#6c757d; }
+  .tick-label{ position:absolute; top:16px; left:50%; transform:translateX(-50%); font-size:.7rem; color:#6c757d; white-space:nowrap; font-weight:600; }
+
+  .value-card{ text-align:center; padding:.8rem; }
+  .value-card .title{ font-size:.8rem; color:#6c757d; text-transform:uppercase; margin-bottom:.25rem; }
+  .value-card .value{ font-size:1.5rem; font-weight:700; }
+  .grid{ display:grid; grid-template-columns: repeat(4,1fr); gap:10px; }
+  @media (max-width: 768px){ .grid{ grid-template-columns: repeat(2,1fr); } }
+  .status-dot{ width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:6px; background:#adb5bd; vertical-align:middle; }
+  .status-ok{ background:#28a745; } .status-bad{ background:#dc3545; } .status-warn{ background:#ffc107; }
+  .small{ font-size: .86rem; color:#6c757d; }
+  .header{ background:linear-gradient(135deg,#0d6efd,#6610f2); color:#fff; padding:1px 0; }
+
+  /* Charging state colorization */
+  .state-green{ color:#28a745 !important; }
+  .state-blue{ color:#0d6efd !important; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="container d-flex justify-content-between align-items-center">
+    <h5 class="m-0"><i class="bi bi-ev-station"></i> Vestel EV – API Frontend</h5>
+    <div class="small">
+      API: <code id="api-base-label"></code>
+      <span id="conn-dot" class="status-dot"></span><span id="conn-label">Connecting…</span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="card mb-3">
+    <div class="card-header">Charging Current Control</div>
+    <div class="card-body">
+      <div class="text-center" style="font-size:2rem; font-weight:800;" id="current-value">-- A</div>
+      <!-- start at 0, no hardcoded 16A default -->
+      <input class="slider" id="current-slider" type="range" min="0" max="32" step="1">
+      <div class="ticks-container" id="ticks-container"></div>
+      <div class="text-center mt-2">
+        <button id="apply-btn" class="btn btn-primary btn-sm"><i class="bi bi-check2"></i> Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header">Current Status</div>
+    <div class="card-body">
+      <div class="grid">
+        <div class="value-card"><div class="title">Charge State</div><div class="value" id="charge-state">--</div></div>
+        <div class="value-card"><div class="title">Power</div><div class="value"><span id="power-value">0.00</span> kW</div></div>
+        <div class="value-card"><div class="title">Session Energy</div><div class="value"><span id="session-energy">0.00</span> kWh</div></div>
+        <div class="value-card"><div class="title">Duration</div><div class="value" id="session-duration">0:00</div></div>
+      </div>
+      <div class="row mt-3">
+        <div class="col-md-6">
+          <table class="table table-sm">
+            <tr><th>L1</th><td id="current-l1">0.00 A</td><td id="voltage-l1">0 V</td><td id="power-l1">0 W</td></tr>
+            <tr><th>L2</th><td id="current-l2">0.00 A</td><td id="voltage-l2">0 V</td><td id="power-l2">0 W</td></tr>
+            <tr><th>L3</th><td id="current-l3">0.00 A</td><td id="voltage-l3">0 V</td><td id="power-l3">0 W</td></tr>
+          </table>
+        </div>
+        <div class="col-md-6">
+          <table class="table table-sm">
+            <tr><th>Serial</th><td id="device-serial">--</td></tr>
+            <tr><th>Max Power</th><td id="device-max-power">--</td></tr>
+            <tr><th>Phases</th><td id="device-phases">--</td></tr>
+            <tr><th>Cable</th><td id="cable-status">--</td></tr>
+            <tr><th>Meter</th><td id="meter-reading">--</td></tr>
+          </table>
+        </div>
+      </div>
+      <div class="small">Last updated: <span id="last-upd">never</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ---------- CONFIG: API base autodetect ----------
+const urlParamAPI = new URLSearchParams(location.search).get('api');
+const API_BASE = urlParamAPI || (location.origin === 'null' ? '' : location.origin);
+document.getElementById('api-base-label').textContent = API_BASE || '';
+
+// ---------- DOM refs ----------
+const connDot = document.getElementById('conn-dot');
+const connLabel = document.getElementById('conn-label');
+const cv = id => document.getElementById(id);
+const slider = cv('current-slider');
+const valueLbl = cv('current-value');
+const ticksContainer = cv('ticks-container');
+const chargeStateEl = cv('charge-state');
+
+// Start with "no connection" visuals until we successfully fetch
+document.body.classList.add('no-conn');
+
+// ---------- Slider cosmetics (PHASE-BASED FILL) ----------
+let latestPhaseMaxA = 0;
+
+function updateSliderFill(){
+  const min = parseFloat(slider.min||'0'); 
+  const max = parseFloat(slider.max||'32'); 
+  const probe = Math.max(min, Math.min(max, latestPhaseMaxA));
+  const pct = ((probe-min)/(max-min))*100;
+  slider.style.background = `linear-gradient(to right,#28a745 0%,#28a745 ${pct}%,#e9ecef ${pct}%,#e9ecef 100%)`;
+}
+
+function generateTicks(){
+  ticksContainer.innerHTML='';
+  const min = parseInt(slider.min||'0',10);
+  const max = parseInt(slider.max||'32',10);
+  const majorsBase=[0,6,10,16,20,25,32];
+  const majors = Array.from(new Set([min,max,...majorsBase.filter(v=>v>=min&&v<=max)])).sort((a,b)=>a-b);
+
+  const wrap = document.createElement('div'); wrap.style.position='relative'; wrap.style.width='100%'; wrap.style.height='30px';
+  for(let v=min; v<=max; v+=2){
+    if(v>0 && v<6) continue;
+    const tick = document.createElement('div');
+    const isMajor = majors.includes(v);
+    tick.className = isMajor ? 'tick-mark major' : 'tick-mark';
+    tick.style.left = ((v-min)/(max-min)*100)+'%';
+    if(isMajor){ const lab=document.createElement('div'); lab.className='tick-label'; lab.textContent=v; tick.appendChild(lab); }
+    wrap.appendChild(tick);
+  }
+  if(!majors.includes(max)){
+    const tick=document.createElement('div'); tick.className='tick-mark major'; tick.style.left='100%';
+    const lab=document.createElement('div'); lab.className='tick-label'; lab.textContent=max; tick.appendChild(lab); wrap.appendChild(tick);
+  }
+  ticksContainer.appendChild(wrap);
+}
+
+// ---------- Helpers ----------
+function fmt(n, p=2){ return Number(n).toFixed(p); }
+function fmtDur(s){ const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return `${h}:${String(m).padStart(2,'0')}`; }
+function setConn(state, msg){
+  connDot.classList.remove('status-ok','status-bad','status-warn');
+  if(state==='ok'){ connDot.classList.add('status-ok'); document.body.classList.remove('no-conn'); }
+  else if(state==='bad'){ connDot.classList.add('status-bad'); document.body.classList.add('no-conn'); }
+  else { connDot.classList.add('status-warn'); /* keep current no-conn state */ }
+  connLabel.textContent = msg;
+}
+
+// ---------- Networking with timeout ----------
+async function fetchJSON(path, {timeout=6000, method='GET'} = {}){
+  if(!API_BASE){ throw new Error('No API base. Open via web server or pass ?api=http://host:port'); }
+  const ctrl = new AbortController();
+  const to = setTimeout(()=>ctrl.abort(), timeout);
+  try{
+    const res = await fetch(`${API_BASE}${path}`, {method, signal: ctrl.signal});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data;
+  } finally { clearTimeout(to); }
+}
+
+// ---------- UI binding ----------
+let isSliderMoving=false, currentChangeTimer=null;
+
+// Do not set a default value label from the element; wait for status.
+// Keep input handling as-is.
+slider.oninput = () => {
+  let v = parseInt(slider.value || '0',10);
+  if(v>0 && v<6){ v=(v<=3)?0:6; slider.value=v; }
+  valueLbl.textContent = `${slider.value} A`;
+  isSliderMoving = true;
+  if(currentChangeTimer) clearTimeout(currentChangeTimer);
+  currentChangeTimer = setTimeout(()=>{ isSliderMoving=false; }, 1500);
+};
+
+document.getElementById('apply-btn').onclick = async () => {
+  try{
+    setConn('warn','Setting…');
+    const v = parseInt(slider.value || '0',10);
+    const data = await fetchJSON(`/set-current?current=${v}`);
+    setConn('ok','Connected');
+    if(data && data.status){ applyStatus(data.status); }
+    else { await refresh(false); }
+  }catch(e){
+    console.error('set-current error', e);
+    setConn('bad', 'Set failed');
+  }
+};
+
+function colorizeChargeState(name){
+  chargeStateEl.classList.remove('state-green','state-blue');
+  if(name === 'Charging'){ chargeStateEl.classList.add('state-green'); }
+  else if(name === 'NotCharging'){ chargeStateEl.classList.add('state-blue'); }
+  chargeStateEl.textContent = name;
+}
+
+// Always prefer failsafe if it exists (even if 0). Fall back only if it's absent.
+function pickSetpointA(settings){
+  if(settings && Object.prototype.hasOwnProperty.call(settings, 'failsafe_current_a')){
+    const fs = Number(settings.failsafe_current_a);
+    if(!Number.isNaN(fs)) return fs;  // allow 0
+  }
+  if(settings && Object.prototype.hasOwnProperty.call(settings, 'dynamic_current_a')){
+    const dyn = Number(settings.dynamic_current_a);
+    if(!Number.isNaN(dyn)) return dyn;
+  }
+  return null;
+}
+
+function applyStatus(data){
+  try{
+    // limits
+    if(data.limits && typeof data.limits.evse_max_a !== 'undefined'){
+      slider.max = data.limits.evse_max_a;
+      generateTicks(); updateSliderFill();
+    }
+    // current setting (prefer failsafe if present, even 0)
+    if(data.settings && !isSliderMoving){
+      const setA = pickSetpointA(data.settings);
+      if(setA !== null){
+        slider.value = setA;
+        valueLbl.textContent = `${setA} A`;
+      } else {
+        // no data: show placeholder until we know
+        valueLbl.textContent = `-- A`;
+      }
+    }
+    // states
+    if(data.states){
+      colorizeChargeState(data.states.charging ? data.states.charging.name : '--');
+      if(data.states.cable) cv('cable-status').textContent = data.states.cable.name;
+    }
+    // identity
+    if(data.identity){
+      cv('device-serial').textContent = data.identity.serial ?? '--';
+      const mpkw = data.identity.max_power_kw ?? (data.identity.max_power_w ? data.identity.max_power_w/1000 : undefined);
+      cv('device-max-power').textContent = (typeof mpkw === 'number' ? mpkw.toFixed(1) : '--') + (typeof mpkw === 'number' ? ' kW' : '');
+      cv('device-phases').textContent = data.identity.phases ?? '--';
+    }
+    // electrical
+    if(data.electrical){
+      const el = data.electrical;
+      if(el.power){
+        const tkw = el.power.total_kw ?? (el.power.total_w ? el.power.total_w/1000 : 0);
+        cv('power-value').textContent = (Number(tkw)||0).toFixed(2);
+        cv('power-l1').textContent = (el.power.l1_w ?? 0) + ' W';
+        cv('power-l2').textContent = (el.power.l2_w ?? 0) + ' W';
+        cv('power-l3').textContent = (el.power.l3_w ?? 0) + ' W';
+      }
+      if(el.current){
+        const l1 = Number(el.current.l1_a ?? 0);
+        const l2 = Number(el.current.l2_a ?? 0);
+        const l3 = Number(el.current.l3_a ?? 0);
+        cv('current-l1').textContent = l1.toFixed(2) + ' A';
+        cv('current-l2').textContent = l2.toFixed(2) + ' A';
+        cv('current-l3').textContent = l3.toFixed(2) + ' A';
+        latestPhaseMaxA = Math.max(l1, l2, l3);
+        updateSliderFill();
+      }
+      if(el.voltage){
+        cv('voltage-l1').textContent = (el.voltage.l1_v ?? 0) + ' V';
+        cv('voltage-l2').textContent = (el.voltage.l2_v ?? 0) + ' V';
+        cv('voltage-l3').textContent = (el.voltage.l3_v ?? 0) + ' V';
+      }
+      if(typeof el.meter_reading_kwh !== 'undefined'){
+        cv('meter-reading').textContent = Number(el.meter_reading_kwh).toFixed(1) + ' kWh';
+      }
+    }
+    // session
+    if(data.session){
+      const ekwh = data.session.energy_kwh ?? (data.session.energy_wh ? data.session.energy_wh/1000 : 0);
+      cv('session-energy').textContent = (Number(ekwh)||0).toFixed(2);
+      cv('session-duration').textContent = fmtDur(data.session.duration_s ?? 0);
+    }
+    cv('last-upd').textContent = new Date().toLocaleString();
+  }catch(e){ console.error('applyStatus error', e); }
+}
+
+async function refresh(showConn=true){
+  try{
+    if(showConn) setConn('warn','Fetching…');
+    const status = await fetchJSON('/status');
+    applyStatus(status);
+    setConn('ok','Connected');
+  }catch(e){
+    console.error('status error', e);
+    setConn('bad', (API_BASE ? 'No response' : 'Set ?api='));
+  }
+}
+
+// ---------- Init ----------
+document.addEventListener('DOMContentLoaded', async () => {
+  // Do not set a numeric default; wait for real data
+  valueLbl.textContent = `-- A`;
+  // Render ticks and initial fill
+  generateTicks(); updateSliderFill();
+  await refresh(true);
+  setInterval(()=>{ if(!isSliderMoving) refresh(false); }, 30000);
+});
+</script>
+</body>
+</html>

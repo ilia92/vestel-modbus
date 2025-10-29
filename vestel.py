@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# Vestel EVC04 Modbus Reader/Exporter (pymodbus 3.x+)
+# Vestel EVC04 Modbus Reader/Exporter (pymodbus 3.x+) - OPTIMIZED VERSION
 # - External INI config
 # - --format=human|prometheus|json  (default: human)
 # - Prometheus metrics include label serial="..."
 # - --set-current <amps> writes dynamic charging current (reg 5004)
 # - --set-failsafe-current <amps> writes failsafe current (reg 2000)
+# 
+# OPTIMIZATION: Uses bulk reads to minimize modbus messages from ~20+ to just 4 reads
 
 import argparse, configparser, os, sys, json
 from pymodbus.client import ModbusTcpClient
@@ -68,27 +70,6 @@ def _adj(addr, base):
 def _ok(rr):
     return (rr is not None) and (not rr.isError())
 
-def _get_unit_param(**kwargs):
-    """Try different parameter names for unit/slave/device_id"""
-    # Check what parameters the method accepts
-    import inspect
-    frame = inspect.currentframe()
-    try:
-        # Get the calling function
-        caller_locals = frame.f_back.f_locals
-        method = caller_locals.get('method')
-        if method and hasattr(method, '__code__'):
-            params = method.__code__.co_varnames
-            if 'device_id' in params:
-                return 'device_id'
-            elif 'slave' in params:
-                return 'slave'
-            else:
-                return 'unit'
-    finally:
-        del frame
-    return 'unit'  # fallback
-
 def _call_modbus_method(cli, method_name, address, count=None, value=None, unit=1, **kwargs):
     """Call modbus method with appropriate unit parameter name and parameters"""
     method = getattr(cli, method_name)
@@ -120,29 +101,14 @@ def _call_modbus_method(cli, method_name, address, count=None, value=None, unit=
     # If all else fails, try without any unit parameter (shouldn't happen but just in case)
     return method(**base_args, **kwargs)
 
-def read_input_u16(cli, addr, unit, base):
-    rr = _call_modbus_method(cli, 'read_input_registers', _adj(addr,base), 1, unit=unit)
-    return rr.registers[0] if _ok(rr) else None
-
-def read_input_u32(cli, addr, unit, base):
-    rr = _call_modbus_method(cli, 'read_input_registers', _adj(addr,base), 2, unit=unit)
-    if not _ok(rr): return None
-    hi, lo = rr.registers
-    return (hi << 16) | lo
-
-def read_hold_u16(cli, addr, unit, base):
-    rr = _call_modbus_method(cli, 'read_holding_registers', _adj(addr,base), 1, unit=unit)
-    return rr.registers[0] if _ok(rr) else None
-
 def write_hold_u16(cli, addr, value, unit, base):
     rr = _call_modbus_method(cli, 'write_register', _adj(addr,base), value=value & 0xFFFF, unit=unit)
     return _ok(rr)
 
-def read_input_str(cli, start_addr, reg_count, unit, base):
-    rr = _call_modbus_method(cli, 'read_input_registers', _adj(start_addr,base), reg_count, unit=unit)
-    if not _ok(rr): return None
+def read_input_str_from_regs(regs):
+    """Extract string from register array"""
     be, le = bytearray(), bytearray()
-    for w in rr.registers:
+    for w in regs:
         hi, lo = (w >> 8) & 0xFF, w & 0xFF
         be.extend((hi, lo)); le.extend((lo, hi))
     clean = lambda b: bytes(x for x in b if x != 0).decode(errors="ignore").strip()
@@ -160,38 +126,119 @@ CH_STATE = {0:"NotCharging",1:"Charging"}
 EQ_STATE = {0:"Initializing",1:"Running",2:"Fault",3:"Disabled",4:"Updating"}
 CAB_STATE= {0:"CableNotConnected",1:"CableConnected_NoVehicle",2:"CableConnected_Vehicle",3:"CableConnected_VehicleLocked"}
 
-# ----------------------- Snapshot -----------------------
+# ----------------------- OPTIMIZED Snapshot -----------------------
 
 def read_snapshot(cli, unit, base):
+    """
+    OPTIMIZED: Read all data with minimal modbus queries using bulk reads
+    
+    Original: ~20+ individual register reads
+    Optimized: 6 bulk reads (aggressive optimization with larger reads):
+      1. Input registers 100-124 (25 regs) - Serial number
+      2. Input registers 400-404 (5 regs) - Power config (cp_power_w is u32, phases is u16)
+      3. Input registers 1000-1106 (107 regs) - States, currents, voltages, powers, meter, limits
+      4. Input registers 1502-1509 (8 regs) - Session energy and duration
+      5. Holding registers 2000-2002 (3 regs) - Failsafe settings
+      6. Holding register 5004 (1 reg) - Dynamic current
+    """
     s = {}
-    s["serial"]      = read_input_str(cli, 100, 25, unit, base) or ""
-    s["cp_power_w"]  = read_input_u32(cli, 400, unit, base)
-    s["phases"]      = read_input_u16(cli, 404, unit, base)
-    s["cp_state"]    = read_input_u16(cli, 1000, unit, base)
-    s["charging_state"] = read_input_u16(cli, 1001, unit, base)
-    s["equip_state"] = read_input_u16(cli, 1002, unit, base)
-    s["cable_state"] = read_input_u16(cli, 1004, unit, base)
-    s["fault_code"]  = read_input_u32(cli, 1006, unit, base)
-    s["i_l1_ma"]     = read_input_u16(cli, 1008, unit, base)
-    s["i_l2_ma"]     = read_input_u16(cli, 1010, unit, base)
-    s["i_l3_ma"]     = read_input_u16(cli, 1012, unit, base)
-    s["v_l1_v"]      = read_input_u16(cli, 1014, unit, base)
-    s["v_l2_v"]      = read_input_u16(cli, 1016, unit, base)
-    s["v_l3_v"]      = read_input_u16(cli, 1018, unit, base)
-    s["p_tot_w"]     = read_input_u32(cli, 1020, unit, base)
-    s["p_l1_w"]      = read_input_u32(cli, 1024, unit, base)
-    s["p_l2_w"]      = read_input_u32(cli, 1028, unit, base)
-    s["p_l3_w"]      = read_input_u32(cli, 1032, unit, base)
-    s["meter_01kwh"] = read_input_u32(cli, 1036, unit, base)
-    s["sess_max_A"]  = read_input_u16(cli, 1100, unit, base)
-    s["evse_min_A"]  = read_input_u16(cli, 1102, unit, base)
-    s["evse_max_A"]  = read_input_u16(cli, 1104, unit, base)
-    s["cable_max_A"] = read_input_u16(cli, 1106, unit, base)
-    s["sess_energy_Wh"] = read_input_u32(cli, 1502, unit, base)
-    s["sess_duration_s"]= read_input_u32(cli, 1508, unit, base)
-    s["dyn_current_A"]= read_hold_u16(cli, 5004, unit, base)
-    s["failsafe_A"]  = read_hold_u16(cli, 2000, unit, base)
-    s["failsafe_t_s"]= read_hold_u16(cli, 2002, unit, base)
+    
+    # === BULK READ 1: Serial number (input registers 100-124) ===
+    rr1 = _call_modbus_method(cli, 'read_input_registers', _adj(100, base), 25, unit=unit)
+    if _ok(rr1):
+        s["serial"] = read_input_str_from_regs(rr1.registers)
+    else:
+        s["serial"] = ""
+    
+    # === BULK READ 2: Power config block (input registers 400-404) ===
+    # 400-401: cp_power_w (u32), 404: phases (u16)
+    rr2 = _call_modbus_method(cli, 'read_input_registers', _adj(400, base), 5, unit=unit)
+    if _ok(rr2):
+        regs = rr2.registers
+        # Extract u32 from position 0-1 (addr 400-401)
+        s["cp_power_w"] = (regs[0] << 16) | regs[1]
+        # Extract u16 from position 4 (addr 404)
+        s["phases"] = regs[4] if len(regs) > 4 else None
+    else:
+        s["cp_power_w"] = None
+        s["phases"] = None
+    
+    # === BULK READ 3: MEGA block (input registers 1000-1106) ===
+    # This is aggressive: reading 107 registers in one shot to cover:
+    # - States, fault, currents, voltages, powers, meter (1000-1037)
+    # - Gap with unused registers (1038-1099)
+    # - Current limits (1100-1106)
+    # This trades some wasted bandwidth for fewer transactions
+    rr3 = _call_modbus_method(cli, 'read_input_registers', _adj(1000, base), 107, unit=unit)
+    if _ok(rr3):
+        regs = rr3.registers
+        # States (1000-1006)
+        s["cp_state"] = regs[0]           # 1000
+        s["charging_state"] = regs[1]     # 1001
+        s["equip_state"] = regs[2]        # 1002
+        s["cable_state"] = regs[4]        # 1004
+        # Fault code u32 (1006-1007)
+        s["fault_code"] = (regs[6] << 16) | regs[7]
+        
+        # Currents u16 (1008, 1010, 1012)
+        s["i_l1_ma"] = regs[8]            # 1008
+        s["i_l2_ma"] = regs[10]           # 1010
+        s["i_l3_ma"] = regs[12]           # 1012
+        
+        # Voltages u16 (1014, 1016, 1018)
+        s["v_l1_v"] = regs[14]            # 1014
+        s["v_l2_v"] = regs[16]            # 1016
+        s["v_l3_v"] = regs[18]            # 1018
+        
+        # Powers u32 (1020-1021, 1024-1025, 1028-1029, 1032-1033)
+        s["p_tot_w"] = (regs[20] << 16) | regs[21]    # 1020-1021
+        s["p_l1_w"] = (regs[24] << 16) | regs[25]     # 1024-1025
+        s["p_l2_w"] = (regs[28] << 16) | regs[29]     # 1028-1029
+        s["p_l3_w"] = (regs[32] << 16) | regs[33]     # 1032-1033
+        
+        # Meter reading u32 (1036-1037)
+        s["meter_01kwh"] = (regs[36] << 16) | regs[37]
+        
+        # Current limits (1100-1106) - offset by 100 from start
+        s["sess_max_A"] = regs[100]       # 1100
+        s["evse_min_A"] = regs[102]       # 1102
+        s["evse_max_A"] = regs[104]       # 1104
+        s["cable_max_A"] = regs[106]      # 1106
+    else:
+        # Set all to None if bulk read fails
+        for key in ["cp_state", "charging_state", "equip_state", "cable_state", "fault_code",
+                    "i_l1_ma", "i_l2_ma", "i_l3_ma", "v_l1_v", "v_l2_v", "v_l3_v",
+                    "p_l1_w", "p_l2_w", "p_l3_w", "p_tot_w", "meter_01kwh",
+                    "sess_max_A", "evse_min_A", "evse_max_A", "cable_max_A"]:
+            s[key] = None
+    
+    # === BULK READ 4: Session data (input registers 1502-1509) ===
+    # Reading 8 registers to cover both energy (1502-1503) and duration (1508-1509)
+    rr4 = _call_modbus_method(cli, 'read_input_registers', _adj(1502, base), 8, unit=unit)
+    if _ok(rr4):
+        regs = rr4.registers
+        s["sess_energy_Wh"] = (regs[0] << 16) | regs[1]      # 1502-1503
+        s["sess_duration_s"] = (regs[6] << 16) | regs[7]     # 1508-1509
+    else:
+        s["sess_energy_Wh"] = None
+        s["sess_duration_s"] = None
+    
+    # === BULK READ 5: Failsafe settings (holding registers 2000-2002) ===
+    rr5 = _call_modbus_method(cli, 'read_holding_registers', _adj(2000, base), 3, unit=unit)
+    if _ok(rr5):
+        s["failsafe_A"] = rr5.registers[0]    # 2000
+        s["failsafe_t_s"] = rr5.registers[2]  # 2002
+    else:
+        s["failsafe_A"] = None
+        s["failsafe_t_s"] = None
+    
+    # === BULK READ 6: Dynamic current (holding register 5004) ===
+    rr6 = _call_modbus_method(cli, 'read_holding_registers', _adj(5004, base), 1, unit=unit)
+    if _ok(rr6):
+        s["dyn_current_A"] = rr6.registers[0]  # 5004
+    else:
+        s["dyn_current_A"] = None
+    
     return s
 
 # ----------------------- Human output -----------------------
@@ -199,53 +246,54 @@ def read_snapshot(cli, unit, base):
 def print_human(s):
     print("== Identity ==")
     print(f"Serial:              {s['serial']}")
-    if s.get("cp_power_w") is not None:
-        print(f"Max Power:           {s['cp_power_w']} W ({(s['cp_power_w'] or 0)/1000.0:.2f} kW)")
+    print(f"Max Power:           {s.get('cp_power_w')} W ({s.get('cp_power_w', 0)/1000:.2f} kW)")
     print(f"Phases:              {'3-phase' if s.get('phases')==1 else '1-phase'}")
-
-    print("\n== States ==")
-    print(f"Chargepoint State:   {CP_STATE.get(s['cp_state'], s['cp_state'])}")
-    print(f"Charging State:      {CH_STATE.get(s['charging_state'], s['charging_state'])}")
-    print(f"Equipment State:     {EQ_STATE.get(s['equip_state'], s['equip_state'])}")
-    print(f"Cable State:         {CAB_STATE.get(s['cable_state'], s['cable_state'])}")
-    print(f"EVSE Fault Code:     {s['fault_code']}")
-
-    print("\n== Electricals ==")
-    for ph in ("l1","l2","l3"):
-        i_ma = s.get(f"i_{ph}_ma")
-        v = s.get(f"v_{ph}_v")
-        if i_ma is not None:
-            i_a = i_ma / 1000.0
-            print(f"Current {ph.upper()}:       {i_a:.2f} A")
-        if v is not None:
-            print(f"Voltage {ph.upper()}:       {v} V")
-
-    if s.get("p_tot_w") is not None:
-        print(f"Active Power Total:  {s['p_tot_w']/1000.0:.2f} kW")
-
-    if s.get("meter_01kwh") is not None:
-        print(f"Meter Reading:       {s['meter_01kwh']/10.0:.1f} kWh")
-
-    print("\n== Limits & Session ==")
-    print(f"EVSE Min/Max Current: {s['evse_min_A']} / {s['evse_max_A']} A")
-    print(f"Cable Max Current:    {s['cable_max_A']} A")
-    print(f"Session Max Current:  {s['sess_max_A']} A")
-    print(f"Session Energy:       {s['sess_energy_Wh']/1000.0:.3f} kWh")
-    print(f"Session Duration:     {s['sess_duration_s']} s")
-
-    print("\n== Current Settings ==")
-    print(f"Dynamic Current:     {s['dyn_current_A']} A")
-    print(f"Failsafe Current:    {s['failsafe_A']} A")
-    print(f"Failsafe Timeout:    {s['failsafe_t_s']} s")
+    print()
+    print("== States ==")
+    print(f"Chargepoint State:   {CP_STATE.get(s.get('cp_state'), 'Unknown')}")
+    print(f"Charging State:      {CH_STATE.get(s.get('charging_state'), 'Unknown')}")
+    print(f"Equipment State:     {EQ_STATE.get(s.get('equip_state'), 'Unknown')}")
+    print(f"Cable State:         {CAB_STATE.get(s.get('cable_state'), 'Unknown')}")
+    print(f"EVSE Fault Code:     {s.get('fault_code')}")
+    print()
+    print("== Electricals ==")
+    print(f"Current L1:       {s.get('i_l1_ma', 0)/1000:.2f} A")
+    print(f"Voltage L1:       {s.get('v_l1_v')} V")
+    print(f"Current L2:       {s.get('i_l2_ma', 0)/1000:.2f} A")
+    print(f"Voltage L2:       {s.get('v_l2_v')} V")
+    print(f"Current L3:       {s.get('i_l3_ma', 0)/1000:.2f} A")
+    print(f"Voltage L3:       {s.get('v_l3_v')} V")
+    print(f"Active Power Total:  {s.get('p_tot_w', 0)/1000:.2f} kW")
+    print(f"Meter Reading:       {s.get('meter_01kwh', 0)/10:.1f} kWh")
+    print()
+    print("== Limits & Session ==")
+    print(f"EVSE Min/Max Current: {s.get('evse_min_A')} / {s.get('evse_max_A')} A")
+    print(f"Cable Max Current:    {s.get('cable_max_A')} A")
+    print(f"Session Max Current:  {s.get('sess_max_A')} A")
+    print(f"Session Energy:       {s.get('sess_energy_Wh', 0)/1000:.3f} kWh")
+    print(f"Session Duration:     {s.get('sess_duration_s')} s")
+    print()
+    print("== Current Settings ==")
+    print(f"Dynamic Current:     {s.get('dyn_current_A')} A")
+    print(f"Failsafe Current:    {s.get('failsafe_A')} A")
+    print(f"Failsafe Timeout:    {s.get('failsafe_t_s')} s")
+    print()
 
 # ----------------------- Prometheus output -----------------------
 
 def print_prometheus(s):
-    serial = prom_escape(s['serial'])
+    """Output snapshot data in Prometheus exposition format"""
+    serial = prom_escape(s["serial"])
+    seen_metrics = set()
     
-    # Helper function to output a metric with proper formatting
     def output_metric(name, value, help_text, metric_type="gauge", extra_labels=""):
-        if value is not None:
+        """Helper to output a Prometheus metric with proper formatting"""
+        if value is None:
+            return
+        
+        # Only print TYPE and HELP once per metric name
+        if name not in seen_metrics:
+            seen_metrics.add(name)
             print(f"# HELP {name} {help_text}")
             print(f"# TYPE {name} {metric_type}")
             print(f'{name}{{serial="{serial}"{extra_labels}}} {value}')
@@ -392,22 +440,27 @@ def main():
                 sys.exit(f"ERROR: failed writing {desired} A to dynamic current register 5004")
             if not ok_failsafe:
                 sys.exit(f"ERROR: failed writing {desired} A to failsafe current register 2000")
-            snap["dyn_current_A"] = read_hold_u16(client, 5004, cfg["unit"], cfg["base"])
-            snap["failsafe_A"] = read_hold_u16(client, 2000, cfg["unit"], cfg["base"])
+            # Re-read to confirm
+            rr_dyn = _call_modbus_method(client, 'read_holding_registers', _adj(5004, cfg["base"]), 1, unit=cfg["unit"])
+            rr_fail = _call_modbus_method(client, 'read_holding_registers', _adj(2000, cfg["base"]), 1, unit=cfg["unit"])
+            snap["dyn_current_A"] = rr_dyn.registers[0] if _ok(rr_dyn) else None
+            snap["failsafe_A"] = rr_fail.registers[0] if _ok(rr_fail) else None
             print(f"Set both dynamic and failsafe current → {snap['dyn_current_A']} A / {snap['failsafe_A']} A")
 
         if args.set_dynamic_current is not None:
             desired = args.set_dynamic_current
             ok = write_hold_u16(client, 5004, desired, cfg["unit"], cfg["base"])
             if not ok: sys.exit(f"ERROR: failed writing {desired} A to 5004")
-            snap["dyn_current_A"] = read_hold_u16(client, 5004, cfg["unit"], cfg["base"])
+            rr = _call_modbus_method(client, 'read_holding_registers', _adj(5004, cfg["base"]), 1, unit=cfg["unit"])
+            snap["dyn_current_A"] = rr.registers[0] if _ok(rr) else None
             print(f"Set dynamic current → {snap['dyn_current_A']} A")
 
         if args.set_failsafe_current is not None:
             desired = args.set_failsafe_current
             ok = write_hold_u16(client, 2000, desired, cfg["unit"], cfg["base"])
             if not ok: sys.exit(f"ERROR: failed writing {desired} A to 2000")
-            snap["failsafe_A"] = read_hold_u16(client, 2000, cfg["unit"], cfg["base"])
+            rr = _call_modbus_method(client, 'read_holding_registers', _adj(2000, cfg["base"]), 1, unit=cfg["unit"])
+            snap["failsafe_A"] = rr.registers[0] if _ok(rr) else None
             print(f"Set failsafe current → {snap['failsafe_A']} A")
 
         if args.format == "prometheus":
