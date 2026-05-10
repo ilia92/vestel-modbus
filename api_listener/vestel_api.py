@@ -46,8 +46,8 @@ def get_metrics():
         )
         return result.stdout, 200, {'Content-Type': 'text/plain'}
     except subprocess.CalledProcessError as e:
-        return jsonify({'error': 'Failed to read metrics', 'details': e.stderr}), 500
-
+        comment = '# ' + json.dumps({'error': 'Failed to read metrics', 'details': e.stderr})
+        return comment, 200, {'Content-Type': 'text/plain'}
 
 @app.route('/set-current', methods=['GET', 'POST'])
 def set_current():
