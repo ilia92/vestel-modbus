@@ -296,7 +296,7 @@ def print_prometheus(s):
             seen_metrics.add(name)
             print(f"# HELP {name} {help_text}")
             print(f"# TYPE {name} {metric_type}")
-            print(f'{name}{{serial="{serial}"{extra_labels}}} {value}')
+        print(f'{name}{{serial="{serial}"{extra_labels}}} {value}')
     
     # Identity metrics
     output_metric("vestel_max_power_watts", s.get("cp_power_w"), "Maximum power in watts")
